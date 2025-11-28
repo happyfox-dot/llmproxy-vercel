@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+import sys
+import os
+# Add current directory to Python path for Vercel deployment
+sys.path.insert(0, os.path.dirname(__file__))
+
 from public.usage import USAGE as html
 from api.hello import router as hello_router
 from fastapi import FastAPI
