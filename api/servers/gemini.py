@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Header, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 import httpx
 import typing
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
 from .base import Message
 import time
 import json
@@ -34,19 +34,25 @@ class OpenAIProxyArgs(BaseModel):
     max_tokens: Optional[int] = None
     presence_penalty: float = 0
     frequency_penalty: float = 0
+    stop: Optional[Union[str, List[str]]] = None
 
 
 class MessageConverter:
     def __init__(self, messages: List[Dict[str, str]]):
         self.messages = messages
+        self.system_instruction = None
 
     def convert(self) -> List[Dict[str, str]]:
         converted_messages = []
         for message in self.messages:
-            role = "user" if message["role"] == "user" else "model"
+            if message.get("role") == "system":
+                self.system_instruction = {"parts": [{"text": message.get("content", "")}]}
+                continue
+                
+            role = "user" if message.get("role") == "user" else "model"
             converted_messages.append({
                 "role": role,
-                "parts": [{"text": message["content"]}]
+                "parts": [{"text": message.get("content", "")}]
             })
         return converted_messages
 
@@ -263,21 +269,36 @@ async def proxy_chat_completions(
         raise HTTPException(status_code=400, detail="API key not provided")
 
     # Transform args into Gemini API format
+    converter = MessageConverter(args.messages)
+    contents = converter.convert()
+
+    generation_config = {
+        "temperature": args.temperature,
+        "maxOutputTokens": args.max_tokens,
+        "topP": args.top_p,
+        "topK": 10,
+        "candidateCount": args.n
+    }
+
+    if args.stop:
+        if isinstance(args.stop, str):
+            generation_config["stopSequences"] = [args.stop]
+        else:
+            generation_config["stopSequences"] = args.stop
+
     gemini_payload = {
-        "contents": MessageConverter(args.messages).convert(),
+        "contents": contents,
         "safetySettings": [
             {
                 "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
                 "threshold": "BLOCK_ONLY_HIGH"
             }
         ],
-        "generationConfig": {
-            "temperature": args.temperature,
-            "maxOutputTokens": args.max_tokens,
-            "topP": args.top_p,
-            "topK": 10
-        }
+        "generationConfig": generation_config
     }
+    
+    if converter.system_instruction:
+        gemini_payload["system_instruction"] = converter.system_instruction
 
     if args.stream:
         return StreamingResponse(
