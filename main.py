@@ -4,13 +4,62 @@ import os
 # Add current directory to Python path for Vercel deployment
 sys.path.insert(0, os.path.dirname(__file__))
 
-from public.usage import USAGE as html
 from api.hello import router as hello_router
 from fastapi import FastAPI
 from fastapi.responses import Response
 from api.servers.generic import router as generic_router
 from api.servers.gemini import router as gemini_router
 from fastapi.middleware.cors import CORSMiddleware
+
+# HTML content inline to avoid module import issues in Vercel
+HTML_CONTENT = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Usage</title>
+    <style>
+        body {
+            font-family: Courier New, monospace;
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            color: #fff;
+            font-size: 1.1em;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #000;
+            border: 1px solid #999;
+            border-radius: 5px;
+        }
+        h1, p {
+            margin: 0;
+            padding: 0;
+        }
+        a {
+            color: #007bff;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <p> success </p>
+        <h1>Usage</h1>
+        <p>Visit <a href="https://github.com/ultrasev/llmproxy-vercel" target="_blank">Github doc</a> for more information.</p>
+    </div>
+</body>
+</html>
+"""
+
 app = FastAPI()
 
 app.include_router(hello_router, prefix="/hello")
@@ -27,4 +76,4 @@ app.add_middleware(
 
 @app.get("/")
 def _root():
-    return Response(content=html, media_type="text/html")
+    return Response(content=HTML_CONTENT, media_type="text/html")
