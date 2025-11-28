@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.responses import Response
 from api.servers.generic import router as generic_router
 from api.servers.gemini import router as gemini_router
-from api.v1 import router as v1_router
+from api.v1.chat import router as v1_chat_router
 from fastapi.middleware.cors import CORSMiddleware
 
 # HTML content inline to avoid module import issues in Vercel
@@ -55,7 +55,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     <div class="container">
         <p> success </p>
         <h1>Usage</h1>
-        <p>Visit <a href="https://github.com/ultrasev/llmproxy-vercel" target="_blank">Github doc</a> for more information.</p>
+        <p>Visit <a href="https://github.com/happyfox/llmproxy-vercel" target="_blank">Github doc</a> for more information.</p>
     </div>
 </body>
 </html>
@@ -65,7 +65,7 @@ app = FastAPI()
 
 app.include_router(hello_router, prefix="/hello")
 app.include_router(gemini_router, prefix="/gemini")
-app.include_router(v1_router, prefix="/v1")  # OpenAI official v1 path
+app.include_router(v1_chat_router, prefix="/v1")  # OpenAI v1 格式的 Gemini 代理
 app.include_router(generic_router, prefix="") # put generic last
 
 app.add_middleware(
