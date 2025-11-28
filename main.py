@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.responses import Response
 from api.servers.generic import router as generic_router
 from api.servers.gemini import router as gemini_router
+from api.v1 import router as v1_router
 from fastapi.middleware.cors import CORSMiddleware
 
 # HTML content inline to avoid module import issues in Vercel
@@ -64,6 +65,7 @@ app = FastAPI()
 
 app.include_router(hello_router, prefix="/hello")
 app.include_router(gemini_router, prefix="/gemini")
+app.include_router(v1_router, prefix="/v1")  # OpenAI official v1 path
 app.include_router(generic_router, prefix="") # put generic last
 
 app.add_middleware(
