@@ -15,6 +15,7 @@ from .base import Message
 import time
 import json
 import re
+import uuid
 
 router = APIRouter()
 
@@ -74,54 +75,132 @@ def convert_gemini_to_openai_response(gemini_response: dict, model: str) -> dict
 
 
 async def stream_gemini_response(model: str, payload: dict, api_key: str):
-    text_pattern = re.compile(r'"text": "(.*?)"')
-
-    async with httpx.AsyncClient() as client:
-        async with client.stream(
-            "POST",
-            GEMINI_STREAM_ENDPOINT.format(model),
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": api_key
-            }
-        ) as response:
-            async for line in response.aiter_lines():
-                line = line.strip()
-                match = text_pattern.search(line)
-                if match:
-                    text_content = match.group(1)
-                    text_content = json.loads(f'"{text_content}"')
-
-                    openai_format = {
-                        "id": f"chatcmpl-{int(time.time())}",
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": model,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {
-                                "content": text_content
-                            },
-                            "finish_reason": None
-                        }]
+    """Stream Gemini API response and convert to OpenAI SSE format."""
+    chat_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
+    created_time = int(time.time())
+    
+    # Increase timeout for Gemini API which can be slow
+    timeout = httpx.Timeout(120.0, connect=30.0, read=120.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            async with client.stream(
+                "POST",
+                GEMINI_STREAM_ENDPOINT.format(model),
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": api_key
+                }
+            ) as response:
+                # Check for HTTP errors
+                if response.status_code != 200:
+                    error_text = await response.aread()
+                    error_data = {
+                        "error": {
+                            "message": f"Gemini API error: {response.status_code}",
+                            "type": "api_error",
+                            "code": response.status_code
+                        }
                     }
-
-                    yield f"data: {json.dumps(openai_format, ensure_ascii=False)}\n\n"
-
-    final_chunk = {
-        "id": f"chatcmpl-{int(time.time())}",
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": {},
-            "finish_reason": "stop"
-        }]
-    }
-    yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
-    yield "data: [DONE]\n\n"
+                    yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+                    return
+                
+                # Process streaming response - Gemini returns JSONL format
+                buffer = ""
+                has_sent_content = False
+                async for chunk in response.aiter_bytes():
+                    try:
+                        buffer += chunk.decode('utf-8', errors='ignore')
+                        
+                        # Process complete JSON objects (JSONL format)
+                        while '\n' in buffer:
+                            line, buffer = buffer.split('\n', 1)
+                            line = line.strip()
+                            if not line:
+                                continue
+                            
+                            try:
+                                # Parse Gemini response
+                                gemini_data = json.loads(line)
+                                
+                                # Extract text content from candidates
+                                candidates = gemini_data.get("candidates", [])
+                                if candidates:
+                                    candidate = candidates[0]
+                                    content = candidate.get("content", {})
+                                    parts = content.get("parts", [])
+                                    
+                                    for part in parts:
+                                        text = part.get("text", "")
+                                        if text:
+                                            has_sent_content = True
+                                            # Convert to OpenAI format
+                                            openai_chunk = {
+                                                "id": chat_id,
+                                                "object": "chat.completion.chunk",
+                                                "created": created_time,
+                                                "model": model,
+                                                "choices": [{
+                                                    "index": 0,
+                                                    "delta": {
+                                                        "content": text
+                                                    },
+                                                    "finish_reason": None
+                                                }]
+                                            }
+                                            yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                                    
+                                    # Check if this is the final chunk
+                                    finish_reason = candidate.get("finishReason")
+                                    if finish_reason:
+                                        final_chunk = {
+                                            "id": chat_id,
+                                            "object": "chat.completion.chunk",
+                                            "created": created_time,
+                                            "model": model,
+                                            "choices": [{
+                                                "index": 0,
+                                                "delta": {},
+                                                "finish_reason": finish_reason.lower() if finish_reason else "stop"
+                                            }]
+                                        }
+                                        yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
+                                        return
+                            except json.JSONDecodeError as e:
+                                # Log and skip invalid JSON lines
+                                logger.debug(f"Invalid JSON line: {line[:100]}")
+                                continue
+                            except Exception as e:
+                                logger.error(f"Error processing Gemini stream: {e}, line: {line[:100]}")
+                                continue
+                    except Exception as e:
+                        logger.error(f"Error reading stream chunk: {e}")
+                        continue
+                
+                # If we didn't send any content, there might be an issue
+                if not has_sent_content and buffer:
+                    logger.warning(f"Received data but no content extracted. Buffer: {buffer[:200]}")
+                
+        except httpx.TimeoutException:
+            error_data = {
+                "error": {
+                    "message": "Request timeout",
+                    "type": "timeout_error"
+                }
+            }
+            yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+            error_data = {
+                "error": {
+                    "message": str(e),
+                    "type": "stream_error"
+                }
+            }
+            yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+        finally:
+            # Always send [DONE] marker
+            yield "data: [DONE]\n\n"
 
 
 @router.post("/chat/completions")
@@ -153,9 +232,20 @@ async def proxy_chat_completions(
     }
 
     if args.stream:
-        return StreamingResponse(stream_gemini_response(model, gemini_payload, api_key), media_type="text/event-stream")
+        return StreamingResponse(
+            stream_gemini_response(model, gemini_payload, api_key),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+                "X-Experimental-Stream-Data": "true"
+            }
+        )
     else:
-        async with httpx.AsyncClient() as client:
+        # Increase timeout for Gemini API which can be slow
+    timeout = httpx.Timeout(120.0, connect=30.0, read=120.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 GEMINI_ENDPOINT.format(model),
                 json=gemini_payload,

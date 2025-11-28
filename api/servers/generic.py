@@ -35,11 +35,17 @@ async def proxy_chat_completions(platform: str, args: OpenAIProxyArgs, authoriza
         return StreamingResponse(
             stream_openai_response(api_url, payload, headers),
             media_type="text/event-stream",
-            headers={"X-Content-Type-Options": "nosniff",
-                     "X-Experimental-Stream-Data": "true"}
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+                "X-Content-Type-Options": "nosniff",
+                "X-Experimental-Stream-Data": "true"
+            }
         )
     else:
-        async with httpx.AsyncClient() as client:
+        timeout = httpx.Timeout(60.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             try:
                 response = await client.post(api_url, json=payload, headers=headers)
                 response.raise_for_status()
