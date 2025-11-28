@@ -79,9 +79,9 @@ async def stream_gemini_response(model: str, payload: dict, api_key: str):
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created_time = int(time.time())
     
-    # Increase timeout for Gemini API which can be slow
-    timeout = httpx.Timeout(120.0, connect=30.0, read=120.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    # Increase timeout for Gemini API which can be slow - Vercel has 60s limit for Hobby plan
+    timeout = httpx.Timeout(60.0, connect=10.0, read=60.0, write=10.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         try:
             async with client.stream(
                 "POST",
@@ -105,81 +105,129 @@ async def stream_gemini_response(model: str, payload: dict, api_key: str):
                     yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
                     return
                 
-                # Process streaming response - Gemini returns JSONL format
+                # Process streaming response - Gemini returns JSONL format (one JSON object per line)
                 buffer = ""
                 has_sent_content = False
-                async for chunk in response.aiter_bytes():
-                    try:
-                        buffer += chunk.decode('utf-8', errors='ignore')
-                        
-                        # Process complete JSON objects (JSONL format)
-                        while '\n' in buffer:
-                            line, buffer = buffer.split('\n', 1)
-                            line = line.strip()
-                            if not line:
-                                continue
+                
+                try:
+                    async for chunk in response.aiter_bytes():
+                        try:
+                            buffer += chunk.decode('utf-8', errors='ignore')
                             
-                            try:
-                                # Parse Gemini response
-                                gemini_data = json.loads(line)
+                            # Process complete JSON objects (JSONL format - one JSON per line)
+                            while '\n' in buffer:
+                                line, buffer = buffer.split('\n', 1)
+                                line = line.strip()
+                                if not line:
+                                    continue
                                 
-                                # Extract text content from candidates
-                                candidates = gemini_data.get("candidates", [])
-                                if candidates:
-                                    candidate = candidates[0]
-                                    content = candidate.get("content", {})
-                                    parts = content.get("parts", [])
+                                try:
+                                    # Parse Gemini response
+                                    gemini_data = json.loads(line)
                                     
-                                    for part in parts:
-                                        text = part.get("text", "")
-                                        if text:
-                                            has_sent_content = True
-                                            # Convert to OpenAI format
-                                            openai_chunk = {
+                                    # Extract text content from candidates
+                                    candidates = gemini_data.get("candidates", [])
+                                    if candidates:
+                                        candidate = candidates[0]
+                                        content = candidate.get("content", {})
+                                        parts = content.get("parts", [])
+                                        
+                                        for part in parts:
+                                            text = part.get("text", "")
+                                            if text:
+                                                has_sent_content = True
+                                                # Convert to OpenAI format
+                                                openai_chunk = {
+                                                    "id": chat_id,
+                                                    "object": "chat.completion.chunk",
+                                                    "created": created_time,
+                                                    "model": model,
+                                                    "choices": [{
+                                                        "index": 0,
+                                                        "delta": {
+                                                            "content": text
+                                                        },
+                                                        "finish_reason": None
+                                                    }]
+                                                }
+                                                yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                                        
+                                        # Check if this is the final chunk
+                                        finish_reason = candidate.get("finishReason")
+                                        if finish_reason:
+                                            final_chunk = {
                                                 "id": chat_id,
                                                 "object": "chat.completion.chunk",
                                                 "created": created_time,
                                                 "model": model,
                                                 "choices": [{
                                                     "index": 0,
-                                                    "delta": {
-                                                        "content": text
-                                                    },
-                                                    "finish_reason": None
+                                                    "delta": {},
+                                                    "finish_reason": finish_reason.lower() if finish_reason else "stop"
                                                 }]
                                             }
-                                            yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
-                                    
-                                    # Check if this is the final chunk
-                                    finish_reason = candidate.get("finishReason")
-                                    if finish_reason:
-                                        final_chunk = {
+                                            yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
+                                            return
+                                except json.JSONDecodeError:
+                                    # Skip invalid JSON lines (might be empty or partial)
+                                    continue
+                                except Exception as e:
+                                    logger.error(f"Error processing Gemini stream: {e}")
+                                    continue
+                        except Exception as e:
+                            logger.error(f"Error reading stream chunk: {e}")
+                            continue
+                    
+                    # Process any remaining data in buffer
+                    if buffer.strip():
+                        try:
+                            gemini_data = json.loads(buffer.strip())
+                            candidates = gemini_data.get("candidates", [])
+                            if candidates:
+                                candidate = candidates[0]
+                                content = candidate.get("content", {})
+                                parts = content.get("parts", [])
+                                for part in parts:
+                                    text = part.get("text", "")
+                                    if text:
+                                        has_sent_content = True
+                                        openai_chunk = {
                                             "id": chat_id,
                                             "object": "chat.completion.chunk",
                                             "created": created_time,
                                             "model": model,
                                             "choices": [{
                                                 "index": 0,
-                                                "delta": {},
-                                                "finish_reason": finish_reason.lower() if finish_reason else "stop"
+                                                "delta": {"content": text},
+                                                "finish_reason": None
                                             }]
                                         }
-                                        yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
-                                        return
-                            except json.JSONDecodeError as e:
-                                # Log and skip invalid JSON lines
-                                logger.debug(f"Invalid JSON line: {line[:100]}")
-                                continue
-                            except Exception as e:
-                                logger.error(f"Error processing Gemini stream: {e}, line: {line[:100]}")
-                                continue
-                    except Exception as e:
-                        logger.error(f"Error reading stream chunk: {e}")
-                        continue
-                
-                # If we didn't send any content, there might be an issue
-                if not has_sent_content and buffer:
-                    logger.warning(f"Received data but no content extracted. Buffer: {buffer[:200]}")
+                                        yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                        except:
+                            pass
+                    
+                    # If we didn't send any content, log warning
+                    if not has_sent_content:
+                        logger.warning(f"No content extracted from Gemini stream. Buffer: {buffer[:200]}")
+                        
+                except httpx.ReadTimeout:
+                    logger.error("Read timeout while streaming from Gemini API")
+                    error_data = {
+                        "error": {
+                            "message": "Stream read timeout",
+                            "type": "timeout_error"
+                        }
+                    }
+                    yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+                except Exception as e:
+                    logger.error(f"Stream processing error: {e}")
+                    error_data = {
+                        "error": {
+                            "message": f"Stream error: {str(e)}",
+                            "type": "stream_error"
+                        }
+                    }
+                    yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
                 
         except httpx.TimeoutException:
             error_data = {
