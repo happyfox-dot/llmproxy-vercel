@@ -244,7 +244,7 @@ async def proxy_chat_completions(
         )
     else:
         # Increase timeout for Gemini API which can be slow
-    timeout = httpx.Timeout(120.0, connect=30.0, read=120.0)
+        timeout = httpx.Timeout(120.0, connect=30.0, read=120.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 GEMINI_ENDPOINT.format(model),
