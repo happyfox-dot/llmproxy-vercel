@@ -65,7 +65,8 @@ app = FastAPI()
 
 app.include_router(hello_router, prefix="/hello")
 app.include_router(gemini_router, prefix="/gemini")
-app.include_router(v1_chat_router, prefix="/v1")  # OpenAI v1 格式的 Gemini 代理
+app.include_router(v1_chat_router, prefix="/v1")  # OpenAI v1 格式
+app.include_router(v1_chat_router, prefix="/gemini/v1")  # 支持 /gemini/v1 格式
 app.include_router(generic_router, prefix="") # put generic last
 
 app.add_middleware(
