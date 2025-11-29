@@ -120,27 +120,22 @@ async def stream_gemini_response(model: str, payload: dict, api_key: str):
                         try:
                             buffer += chunk.decode('utf-8', errors='ignore')
                             
-                            # Process complete JSON objects (JSONL format - one JSON per line)
-                            while '\n' in buffer:
-                                line, buffer = buffer.split('\n', 1)
-                                line = line.strip()
-                                if not line:
-                                    continue
+                            while buffer:
+                                buffer = buffer.lstrip()
+                                if not buffer:
+                                    break
                                 
-                                # Handle JSON array format (remove [ ] ,)
-                                if line.startswith('['):
-                                    line = line[1:].strip()
-                                if line.endswith(']'):
-                                    line = line[:-1].strip()
-                                if line.endswith(','):
-                                    line = line[:-1].strip()
-                                
-                                if not line:
+                                # Skip array separators
+                                if buffer.startswith(('[', ',', ']')):
+                                    buffer = buffer[1:]
                                     continue
                                 
                                 try:
-                                    # Parse Gemini response
-                                    gemini_data = json.loads(line)
+                                    # Try to parse a JSON object from the start of the buffer
+                                    decoder = json.JSONDecoder()
+                                    gemini_data, idx = decoder.raw_decode(buffer)
+                                    # Advance buffer past the parsed object
+                                    buffer = buffer[idx:]
                                     
                                     # Extract text content from candidates
                                     candidates = gemini_data.get("candidates", [])
@@ -186,55 +181,20 @@ async def stream_gemini_response(model: str, payload: dict, api_key: str):
                                             yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
                                             return
                                 except json.JSONDecodeError:
-                                    # Skip invalid JSON lines (might be empty or partial)
-                                    continue
+                                    # Incomplete JSON object, wait for more data
+                                    break
                                 except Exception as e:
                                     logger.error(f"Error processing Gemini stream: {e}")
-                                    continue
+                                    # If we can't parse it but it's not a JSON error, we might need to skip it to avoid infinite loop
+                                    # But for now, let's assume valid JSON stream and break to wait for more data
+                                    break
                         except Exception as e:
                             logger.error(f"Error reading stream chunk: {e}")
                             continue
                     
-                    # Process any remaining data in buffer
-                    if buffer.strip():
-                        try:
-                            cleaned_buffer = buffer.strip()
-                            if cleaned_buffer.startswith('['):
-                                cleaned_buffer = cleaned_buffer[1:].strip()
-                            if cleaned_buffer.endswith(']'):
-                                cleaned_buffer = cleaned_buffer[:-1].strip()
-                            if cleaned_buffer.endswith(','):
-                                cleaned_buffer = cleaned_buffer[:-1].strip()
-
-                            if cleaned_buffer:
-                                gemini_data = json.loads(cleaned_buffer)
-                                candidates = gemini_data.get("candidates", [])
-                                if candidates:
-                                    candidate = candidates[0]
-                                    content = candidate.get("content", {})
-                                    parts = content.get("parts", [])
-                                    for part in parts:
-                                        text = part.get("text", "")
-                                        if text:
-                                            has_sent_content = True
-                                            openai_chunk = {
-                                                "id": chat_id,
-                                                "object": "chat.completion.chunk",
-                                                "created": created_time,
-                                                "model": model,
-                                                "choices": [{
-                                                    "index": 0,
-                                                    "delta": {"content": text},
-                                                    "finish_reason": None
-                                                }]
-                                            }
-                                            yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
-                        except:
-                            pass
-                    
                     # If we didn't send any content, log warning
                     if not has_sent_content:
-                        logger.warning(f"No content extracted from Gemini stream. Buffer: {buffer[:200]}")
+                        logger.warning(f"No content extracted from Gemini stream. Buffer length: {len(buffer)}. Preview: {buffer[:200]}")
                         
                 except httpx.ReadTimeout:
                     logger.error("Read timeout while streaming from Gemini API")
