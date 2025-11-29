@@ -127,6 +127,17 @@ async def stream_gemini_response(model: str, payload: dict, api_key: str):
                                 if not line:
                                     continue
                                 
+                                # Handle JSON array format (remove [ ] ,)
+                                if line.startswith('['):
+                                    line = line[1:].strip()
+                                if line.endswith(']'):
+                                    line = line[:-1].strip()
+                                if line.endswith(','):
+                                    line = line[:-1].strip()
+                                
+                                if not line:
+                                    continue
+                                
                                 try:
                                     # Parse Gemini response
                                     gemini_data = json.loads(line)
@@ -187,28 +198,37 @@ async def stream_gemini_response(model: str, payload: dict, api_key: str):
                     # Process any remaining data in buffer
                     if buffer.strip():
                         try:
-                            gemini_data = json.loads(buffer.strip())
-                            candidates = gemini_data.get("candidates", [])
-                            if candidates:
-                                candidate = candidates[0]
-                                content = candidate.get("content", {})
-                                parts = content.get("parts", [])
-                                for part in parts:
-                                    text = part.get("text", "")
-                                    if text:
-                                        has_sent_content = True
-                                        openai_chunk = {
-                                            "id": chat_id,
-                                            "object": "chat.completion.chunk",
-                                            "created": created_time,
-                                            "model": model,
-                                            "choices": [{
-                                                "index": 0,
-                                                "delta": {"content": text},
-                                                "finish_reason": None
-                                            }]
-                                        }
-                                        yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
+                            cleaned_buffer = buffer.strip()
+                            if cleaned_buffer.startswith('['):
+                                cleaned_buffer = cleaned_buffer[1:].strip()
+                            if cleaned_buffer.endswith(']'):
+                                cleaned_buffer = cleaned_buffer[:-1].strip()
+                            if cleaned_buffer.endswith(','):
+                                cleaned_buffer = cleaned_buffer[:-1].strip()
+
+                            if cleaned_buffer:
+                                gemini_data = json.loads(cleaned_buffer)
+                                candidates = gemini_data.get("candidates", [])
+                                if candidates:
+                                    candidate = candidates[0]
+                                    content = candidate.get("content", {})
+                                    parts = content.get("parts", [])
+                                    for part in parts:
+                                        text = part.get("text", "")
+                                        if text:
+                                            has_sent_content = True
+                                            openai_chunk = {
+                                                "id": chat_id,
+                                                "object": "chat.completion.chunk",
+                                                "created": created_time,
+                                                "model": model,
+                                                "choices": [{
+                                                    "index": 0,
+                                                    "delta": {"content": text},
+                                                    "finish_reason": None
+                                                }]
+                                            }
+                                            yield f"data: {json.dumps(openai_chunk, ensure_ascii=False)}\n\n"
                         except:
                             pass
                     
